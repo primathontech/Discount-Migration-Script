@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Ratio Discount Migration</title>
+<style>
+  :root { --bg:#0f1419; --card:#1a2027; --line:#2b333d; --fg:#e6edf3; --muted:#8b98a5; --accent:#3b82f6; --ok:#22c55e; --warn:#f59e0b; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--fg); }
+  .wrap { max-width:920px; margin:0 auto; padding:24px 16px 60px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:18px; margin-bottom:16px; }
+  .card h2 { font-size:15px; margin:0 0 14px; display:flex; align-items:center; gap:8px; }
+  .step { background:var(--accent); color:#fff; width:22px; height:22px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; }
+  label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
+  input, select { width:100%; padding:9px 10px; background:#0d1117; border:1px solid var(--line); border-radius:7px; color:var(--fg); font:inherit; }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .chk { display:flex; align-items:center; gap:8px; margin:8px 0; color:var(--fg); }
+  .chk input { width:auto; }
+  button { padding:9px 16px; background:var(--accent); color:#fff; border:0; border-radius:7px; font:inherit; font-weight:600; cursor:pointer; }
+  button:hover { filter:brightness(1.1); } button:disabled { opacity:.5; cursor:not-allowed; }
+  button.ghost { background:transparent; border:1px solid var(--line); color:var(--fg); }
+  .pill { font-size:12px; padding:2px 8px; border-radius:20px; }
+  .pill.set { background:rgba(34,197,94,.15); color:var(--ok); } .pill.unset { background:rgba(245,158,11,.15); color:var(--warn); }
+  .log { background:#0a0d11; border:1px solid var(--line); border-radius:7px; padding:12px; height:230px; overflow:auto; white-space:pre-wrap; font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; color:#cbd5e1; margin-top:12px; display:none; }
+  .muted { color:var(--muted); font-size:12px; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  td, th { text-align:left; padding:7px 8px; border-bottom:1px solid var(--line); }
+  .disabledCard { opacity:.5; pointer-events:none; }
+  .toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); background:var(--ok); color:#04210f; padding:10px 18px; border-radius:8px; font-weight:600; display:none; z-index:10; }
+  .runbar { position:fixed; bottom:0; left:0; right:0; background:#11161c; border-top:1px solid var(--line); padding:12px 16px; display:none; align-items:center; gap:10px; z-index:9; }
+  .runbar .dot { width:9px; height:9px; border-radius:50%; background:var(--ok); animation:pulse 1.2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+  .runbar button.stop { background:#dc2626; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Shopify → Ratio Discount Migration</h1>
+  <p class="sub">Set credentials, run the two stages, and download the report. (The terminal commands still work too.)</p>
+
+  <!-- Step 1: creds -->
+  <div class="card">
+    <h2><span class="step">1</span> Credentials <span id="credStatus"></span></h2>
+    <div class="row">
+      <div><label>Shopify store domain</label><input id="shopDomain" placeholder="your-store.myshopify.com"></div>
+      <div><label>Ratio merchant ID</label><input id="osMid" placeholder="merchant-mid"></div>
+    </div>
+    <label>Shopify Admin API token <span id="tokTag" class="muted"></span></label>
+    <input id="shopToken" placeholder="shpat_… (leave blank to keep existing)" type="password">
+    <label>Ratio cookie <span id="ckTag" class="muted"></span></label>
+    <input id="osCookie" placeholder="cto_bundle=…; token=… (leave blank to keep existing)" type="password">
+    <div style="margin-top:14px"><button onclick="saveEnv()">Save credentials</button>
+      <button class="ghost" onclick="clearEnv()" style="margin-left:8px">Clear credentials</button>
+      <span class="muted" style="margin-left:10px">Saved to <code>.env</code> on this machine.</span></div>
+  </div>
+
+  <!-- Step 2: stage 1 -->
+  <div class="card" id="s1card">
+    <h2><span class="step">2</span> Stage 1 — Extract from Shopify</h2>
+    <div class="row">
+      <div><label>Merchant slug (folder name)</label><input id="slug" placeholder="acme"></div>
+      <div><label>Status</label><select id="s1status"><option value="active">active only</option><option value="all">all (incl. expired)</option></select></div>
+    </div>
+    <div style="margin-top:14px"><button id="s1btn" onclick="runStage1()">Run Stage 1</button></div>
+    <div class="log" id="s1log"></div>
+  </div>
+
+  <!-- Step 3: stage 2 -->
+  <div class="card" id="s2card">
+    <h2><span class="step">3</span> Stage 2 — Migrate to Ratio</h2>
+    <label>Extract file</label>
+    <select id="s2file"><option value="">— run Stage 1 first, or pick an existing extract —</option></select>
+    <div style="margin-top:6px">
+      <label class="chk"><input type="checkbox" id="skipSets"> Skip multi-code sets (defer huge code-sets)</label>
+      <label class="chk"><input type="checkbox" id="skipCust"> Skip customer-specific discounts</label>
+      <label class="chk"><input type="checkbox" id="resetLedger"> Reset ledger (start fresh, ignore resume)</label>
+    </div>
+    <div style="margin-top:10px"><button id="s2btn" onclick="runStage2()">Run Stage 2</button>
+      <button class="ghost" onclick="loadExtracts()">↻ refresh files</button></div>
+    <div class="log" id="s2log"></div>
+  </div>
+
+  <!-- Delete -->
+  <div class="card">
+    <h2><span class="step">4</span> Delete discounts <span class="muted" style="font-weight:400">(optional cleanup)</span></h2>
+    <div class="row">
+      <div><label>What to delete</label>
+        <select id="delMode" onchange="onDelMode()">
+          <option value="draft">All draft / unpublished</option>
+          <option value="published">All published</option>
+          <option value="all">Everything (all discounts)</option>
+          <option value="codes">Specific codes</option>
+        </select>
+      </div>
+      <div id="delCodesWrap" style="display:none"><label>Codes (comma-separated)</label><input id="delCodes" placeholder="SAVE10, WELCOME"></div>
+    </div>
+    <label class="chk" style="margin-top:10px"><input type="checkbox" id="delConfirm"> <b>Confirm delete</b> — unchecked = dry run (count only)</label>
+    <div style="margin-top:8px"><button id="delBtn" onclick="runDelete()">Run</button>
+      <span class="muted" id="delWarn" style="margin-left:10px"></span></div>
+    <div class="log" id="delLog"></div>
+  </div>
+
+  <!-- Reports -->
+  <div class="card">
+    <h2><span class="step">5</span> Reports <button class="ghost" style="margin-left:auto;font-size:12px;padding:4px 10px" onclick="loadReports()">↻ refresh</button></h2>
+    <table id="reportsTbl"><tbody><tr><td class="muted">No reports yet — run Stage 2.</td></tr></tbody></table>
+  </div>
+</div>
+<div class="toast" id="toast"></div>
+<div class="runbar" id="runbar">
+  <span class="dot"></span>
+  <span id="runbarLabel" style="font-weight:600">Running…</span>
+  <span style="flex:1"></span>
+  <button class="ghost" id="pauseBtn" onclick="ctl('pause')">Pause</button>
+  <button class="ghost" id="resumeBtn" onclick="ctl('resume')" style="display:none">Resume</button>
+  <button class="stop" id="stopBtn" onclick="ctl('stop')">Stop</button>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+function toast(msg){ const t=$('toast'); t.textContent=msg; t.style.display='block'; setTimeout(()=>t.style.display='none', 2200); }
+
+async function loadEnv(){
+  const e = await (await fetch('/api/env')).json();
+  $('shopDomain').value=e.SHOPIFY_STORE_DOMAIN||''; $('osMid').value=e.OPENSTORE_MERCHANT_ID||'';
+  $('tokTag').textContent = e.SHOPIFY_ADMIN_TOKEN_set ? '(saved: '+e.SHOPIFY_ADMIN_TOKEN_mask+')' : '(not set)';
+  $('ckTag').textContent  = e.OPENSTORE_COOKIE_set ? '(saved: '+e.OPENSTORE_COOKIE_mask+')' : '(not set)';
+  const ok = e.SHOPIFY_STORE_DOMAIN && e.SHOPIFY_ADMIN_TOKEN_set && e.OPENSTORE_MERCHANT_ID && e.OPENSTORE_COOKIE_set;
+  $('credStatus').innerHTML = ok ? '<span class="pill set">configured</span>' : '<span class="pill unset">incomplete</span>';
+}
+async function saveEnv(){
+  const body = { SHOPIFY_STORE_DOMAIN:$('shopDomain').value.trim(), OPENSTORE_MERCHANT_ID:$('osMid').value.trim(),
+    SHOPIFY_ADMIN_TOKEN:$('shopToken').value.trim(), OPENSTORE_COOKIE:$('osCookie').value.trim() };
+  await fetch('/api/env',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  $('shopToken').value=''; $('osCookie').value=''; toast('Credentials saved'); loadEnv();
+}
+async function clearEnv(){
+  if(!window.confirm('Clear saved credentials from .env on this machine?')) return;
+  await fetch('/api/env/clear',{method:'POST'});
+  $('shopDomain').value=''; $('osMid').value=''; $('shopToken').value=''; $('osCookie').value='';
+  toast('Credentials cleared'); loadEnv();
+}
+async function loadExtracts(){
+  const list = await (await fetch('/api/extracts')).json();
+  const sel=$('s2file'); const cur=sel.value;
+  sel.innerHTML = '<option value="">— select an extract —</option>' + list.map(f=>`<option value="${f.rel}">${f.slug} / ${f.file}</option>`).join('');
+  if(cur) sel.value=cur;
+}
+async function loadReports(){
+  const list = await (await fetch('/api/reports')).json();
+  const tb=$('reportsTbl').querySelector('tbody');
+  if(!list.length){ tb.innerHTML='<tr><td class="muted">No reports yet — run Stage 2.</td></tr>'; return; }
+  tb.innerHTML = list.map(f=>`<tr><td>${f.slug}</td><td>${f.file}</td><td>${new Date(f.mtime).toLocaleString()}</td>
+    <td><a href="/api/download?file=${encodeURIComponent(f.rel)}"><button class="ghost" style="padding:4px 12px">Download</button></a></td></tr>`).join('');
+}
+let activeRun = null;
+function showRunbar(runId, label){ activeRun=runId; $('runbarLabel').textContent=label||'Running…'; $('pauseBtn').style.display=''; $('resumeBtn').style.display='none'; $('runbar').style.display='flex'; }
+function hideRunbar(){ activeRun=null; $('runbar').style.display='none'; }
+async function ctl(action){
+  if(!activeRun) return;
+  if(action==='stop' && !window.confirm('Stop the current run? Progress is saved — you can re-run to resume.')) return;
+  await fetch('/api/run/control',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({runId:activeRun,action})});
+  if(action==='pause'){ $('pauseBtn').style.display='none'; $('resumeBtn').style.display=''; $('runbarLabel').textContent='Paused'; }
+  if(action==='resume'){ $('pauseBtn').style.display=''; $('resumeBtn').style.display='none'; $('runbarLabel').textContent='Running…'; }
+}
+async function poll(runId, logEl, btn, after, label){
+  let from=0; showRunbar(runId, label);
+  while(true){
+    const r = await (await fetch('/api/logs?runId='+runId+'&from='+from)).json();
+    if(r.lines && r.lines.length){ logEl.textContent += r.lines.join('\n')+'\n'; logEl.scrollTop=logEl.scrollHeight; from=r.next; }
+    if(r.done){ btn.disabled=false; hideRunbar(); if(after) after(r.exitCode); break; }
+    await new Promise(s=>setTimeout(s,1000));
+  }
+}
+async function runStage1(){
+  const btn=$('s1btn'), log=$('s1log'); btn.disabled=true; log.style.display='block'; log.textContent='Starting…\n';
+  const res = await (await fetch('/api/run/stage1',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({merchant:$('slug').value.trim()||'store', status:$('s1status').value})})).json();
+  if(res.error){ log.textContent+=res.error+'\n'; btn.disabled=false; return; }
+  poll(res.runId, log, btn, ()=>{ loadExtracts(); toast('Stage 1 finished'); }, 'Stage 1 — extracting from Shopify…');
+}
+async function runStage2(){
+  const file=$('s2file').value; if(!file){ toast('Pick an extract file'); return; }
+  const btn=$('s2btn'), log=$('s2log'); btn.disabled=true; log.style.display='block'; log.textContent='Starting…\n';
+  const body={ file, skipSets:$('skipSets').checked, skipCustomerSpecific:$('skipCust').checked, resetLedger:$('resetLedger').checked };
+  const res = await (await fetch('/api/run/stage2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+  if(res.error){ log.textContent+=res.error+'\n'; btn.disabled=false; return; }
+  poll(res.runId, log, btn, ()=>{ loadReports(); toast('Stage 2 finished'); }, 'Stage 2 — migrating to Ratio…');
+}
+function onDelMode(){
+  const m=$('delMode').value;
+  $('delCodesWrap').style.display = m==='codes' ? 'block' : 'none';
+  $('delWarn').textContent = m==='all' ? '⚠ deletes ALL discounts — dry-run first!' : (m==='published' ? '⚠ removes live discounts' : '');
+}
+async function runDelete(){
+  const mode=$('delMode').value, confirm=$('delConfirm').checked;
+  if(mode==='all' && confirm && !window.confirm('Delete ALL discounts for this merchant? This cannot be undone from here.')) return;
+  const btn=$('delBtn'), log=$('delLog'); btn.disabled=true; log.style.display='block'; log.textContent='Starting…\n';
+  const body={ mode, confirm, codes: mode==='codes' ? $('delCodes').value : '' };
+  const res = await (await fetch('/api/run/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+  if(res.error){ log.textContent+=res.error+'\n'; btn.disabled=false; return; }
+  poll(res.runId, log, btn, ()=>{ if(confirm){ loadReports(); toast('Delete finished'); } else toast('Dry run finished'); }, 'Delete running…');
+}
+loadEnv(); loadExtracts(); loadReports(); onDelMode();
+</script>
+</body>
+</html>

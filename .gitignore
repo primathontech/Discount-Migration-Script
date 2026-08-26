@@ -1,0 +1,13 @@
+# secrets
+.env
+
+# dependencies
+node_modules/
+
+# migration output (extracts, reports, ledgers) — data, not code
+migrations/*
+!migrations/.gitkeep
+
+# logs / os cruft
+*.log
+.DS_Store

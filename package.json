@@ -1,0 +1,19 @@
+{
+  "name": "discount-migration-script",
+  "version": "1.0.0",
+  "description": "Migrate Shopify discounts to OpenStore (GoKwik): extract from Shopify, recreate in OS with correct values, and produce an Excel report.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node ./src/server.mjs",
+    "ui": "node ./src/server.mjs",
+    "extract:stage1": "node ./src/cli.mjs",
+    "migrate:stage2": "node ./src/cli-stage2.mjs",
+    "delete:discounts": "node ./src/cli-delete.mjs",
+    "ui": "node ./src/server.mjs",
+    "test": "node --test"
+  }
+}
