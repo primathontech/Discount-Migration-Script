@@ -129,11 +129,6 @@ function mapBasic(discount, idMapping) {
   const unmappedIds = [];
   const isPercentage = discount.value_type === 'percentage';
 
-  // Action: FLAT_OFF (fixed, in paisa) or PERCENT_OFF (percentage, as-is).
-  const action = isPercentage
-    ? { type: 'CART', method: 'PERCENT_OFF', amount: Number(discount.value) }
-    : { type: 'CART', method: 'FLAT_OFF', amount: toPaisa(discount.value) };
-
   // Minimum requirement (Shopify: subtotal amount or item quantity).
   const min = readMinimum(discount);
 
@@ -150,11 +145,28 @@ function mapBasic(discount, idMapping) {
     // sitewide; migrate-stage2 sees the unmappedIds and drafts it so we don't publish a wrong scope.
   }
 
+  // Action. The action decides WHAT gets discounted:
+  //   - A SCOPED PERCENTAGE must be a PRODUCT action with the scope in `buy_rules`, so the % is
+  //     applied to the scoped items only. A CART percentage would wrongly discount the WHOLE cart
+  //     (verified: dashboard shows the collection either way, but a CART % over-discounts).
+  //   - Flat amounts stay CART-level (matches the dashboard's own flat+collection shape, e.g. DD150).
+  //   - Unscoped percentage/flat is naturally CART-level.
+  // buy_rules gets a clone of the matcher taken BEFORE any subtotal min_value is added to it
+  // (min_value belongs on the eligibility matcher, not on the target rule).
+  let action;
+  if (matcher && isPercentage) {
+    action = { type: 'PRODUCT', method: 'PERCENT_OFF', amount: Number(discount.value), buy_rules: [{ ...matcher }] };
+  } else if (isPercentage) {
+    action = { type: 'CART', method: 'PERCENT_OFF', amount: Number(discount.value) };
+  } else {
+    action = { type: 'CART', method: 'FLAT_OFF', amount: toPaisa(discount.value) };
+  }
+
   // Assemble cart_conditions. KEY CONSTRAINT (verified against the V2 API):
   //   product_matchers are ONLY allowed on CART_QUANTITY — CART_AMOUNT rejects them.
-  // So a SCOPED discount always uses CART_QUANTITY, and a subtotal minimum is carried as the
-  // matcher's `min_value` (paisa) — "minimum cart value from matched products". Only an
-  // UNSCOPED subtotal minimum uses CART_AMOUNT.
+  // So a SCOPED discount always uses CART_QUANTITY (product_matchers drive the dashboard display
+  // + eligibility gate), and a subtotal minimum is carried as the matcher's `min_value` (paisa) —
+  // "minimum cart value from matched products". Only an UNSCOPED subtotal minimum uses CART_AMOUNT.
   let cartConditions = null;
   if (matcher) {
     if (min.kind === 'subtotal') matcher.min_value = toPaisa(min.value);

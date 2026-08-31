@@ -51,6 +51,40 @@ test('percentage off, no scope, subtotal minimum -> CART_AMOUNT (min in paisa), 
   assert.ok(!p.cart_conditions.product_matchers);
 });
 
+test('scoped PERCENTAGE -> PRODUCT action with buy_rules (applies to scoped items, not whole cart)', () => {
+  const d = {
+    title: 'VINU10', status: 'ACTIVE', normalized_type: 'code_basic',
+    value_type: 'percentage', value: 10,
+    codes: [{ code: 'VINU10' }], code_count: 1,
+    items: { type: 'specific_collections', collections: [{ id: 'gid://shopify/Collection/167521615949' }] },
+    customer_selection: { type: 'all' },
+  };
+  const p = prepareSingleCodePayload(mapDiscountToOpenStore(d, idMapping));
+  const a = p.actions[0];
+  assert.equal(a.type, 'PRODUCT'); // NOT CART — a CART % would discount the whole cart
+  assert.equal(a.method, 'PERCENT_OFF');
+  assert.equal(a.amount, 10);
+  assert.equal(a.buy_rules[0].match_by, 'CollectionId');
+  assert.deepEqual(a.buy_rules[0].ids, ['OS_167521615949']);
+  // and it still displays: product_matchers present on cart_conditions
+  assert.equal(p.cart_conditions.product_matchers[0].match_by, 'CollectionId');
+});
+
+test('scoped FLAT amount stays CART-level (matches dashboard flat+collection shape)', () => {
+  const d = {
+    title: 'DD150', status: 'ACTIVE', normalized_type: 'code_basic',
+    value_type: 'fixed_amount', value: 150,
+    codes: [{ code: 'DD150' }], code_count: 1,
+    items: { type: 'specific_collections', collections: [{ id: 'gid://shopify/Collection/290444673201' }] },
+    customer_selection: { type: 'all' },
+  };
+  const p = prepareSingleCodePayload(mapDiscountToOpenStore(d, idMapping));
+  assert.equal(p.actions[0].type, 'CART');
+  assert.equal(p.actions[0].method, 'FLAT_OFF');
+  assert.ok(!p.actions[0].buy_rules); // flat is cart-level, no buy_rules
+  assert.equal(p.cart_conditions.product_matchers[0].match_by, 'CollectionId');
+});
+
 test('scoped + subtotal minimum -> CART_QUANTITY with matcher.min_value (paisa)', () => {
   const d = {
     title: 'welcome', status: 'ACTIVE', normalized_type: 'code_basic',
