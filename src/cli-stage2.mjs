@@ -267,7 +267,13 @@ async function main() {
   }
   const ledger = new MigrationLedger(ledgerPath);
   await ledger.load();
-  if (ledger.size() > 0) {
+  // A targeted --code run means "(re)create just this one" (e.g. delete one in the dashboard,
+  // then recreate it). The resume ledger would skip an already-migrated code, so bypass it here
+  // — 409 still guards against a genuine duplicate that still exists in OS.
+  const bypassLedger = !!args.code;
+  if (bypassLedger) {
+    console.log('Ledger: bypassed for --code run (will (re)create the matched discount(s)).');
+  } else if (ledger.size() > 0) {
     console.log(`Ledger: ${ledger.size()} discount(s) already migrated, will be skipped.`);
   } else {
     console.log(`Ledger: empty (new ledger at ${ledgerPath})`);
@@ -282,7 +288,7 @@ async function main() {
       discounts: filteredDiscounts,
       config,
       idMapping,
-      ledger,
+      ledger: bypassLedger ? null : ledger,
     });
   } finally {
     await ledger.close();
