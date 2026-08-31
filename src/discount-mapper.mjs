@@ -1,8 +1,8 @@
 import { IdMapping } from './id-mapping.mjs';
 
 /**
- * Shopify stores money in rupees; the OpenStore create endpoint stores it in PAISA
- * (confirmed: sending value 539.1 displayed as ₹5.39). Convert money rupees -> paisa.
+ * Shopify stores money in rupees; the OpenStore discount service stores it in PAISA
+ * (confirmed: sending amount 15000 displayed as ₹150). Convert money rupees -> paisa.
  * Do NOT apply to percentages or quantities.
  */
 function toPaisa(rupees) {
@@ -11,50 +11,77 @@ function toPaisa(rupees) {
 }
 
 /**
- * Maps Shopify discount format to OpenStore format — matches the PROD dashboard's own
- * create payload (POST /v3/api/api/v1/admin/os-discount/create). Money is sent in PAISA;
- * status:published so active discounts go live.
+ * Maps a Shopify discount to the OpenStore/Ratio **Dashboard V2** discount shape — the exact
+ * payload the PROD dashboard itself sends to
+ *   POST /v3/api/dashboard/v2/discount/create
+ *   PUT  /v3/api/dashboard/v2/discount/update/:id
+ * (captured from the dashboard's own network calls; see "Discount Service V2 API Documentation").
+ *
+ * This is the shape the dashboard READS scope/conditions from. The older
+ * os-discount/create endpoint (rules[].conditions/actions + product_attribute) stored a
+ * representation the dashboard's "Applies to" / min-condition UI does NOT read, which is why
+ * collection/product scope and minimums showed wrong. This mapper fixes that.
+ *
+ * Shape summary:
+ *   - type: CART | BXGY
+ *   - actions[]: { type, method: FLAT_OFF|PERCENT_OFF|FREE, amount, buy_rules?, get_rule?, get_quantity? }
+ *   - cart_conditions: { type: CART_AMOUNT|CART_QUANTITY, min_value, reference?, product_matchers[] }
+ *   - product_matchers[]: { match_by: CollectionId|VariantId|Id|Tag, ids[], min_quantity }
+ *   - targeting: { applicable_for_all_users, applicable_user_ids[], ... }
+ *   - usage_limit: { total_uses, per_user, per_order }
+ * Money is sent in PAISA; status:published so active Shopify discounts go live.
+ *
  * @param {Object} shopifyDiscount - The Shopify discount
- * @param {IdMapping} idMapping - ID mapping for collections/products/variants
+ * @param {IdMapping} idMapping - ID mapping for collections (products/variants reuse Shopify ids)
  */
 export function mapDiscountToOpenStore(shopifyDiscount, idMapping = new IdMapping()) {
-  // Usage: OS tracks its own used-count from 0 (can't seed "already used"), and coerces
-  // available_coupons:0 to unlimited. So we set available_coupons = REMAINING (limit-used).
-  // Exhausted (remaining 0) -> can't express as 0, so flag it to be created as draft.
+  // Usage: OS tracks its own used-count from 0 (can't seed "already used"). total_uses:0 means
+  // UNLIMITED, so we set total_uses = REMAINING (limit-used). Exhausted (remaining 0) can't be
+  // expressed (0 == unlimited), so we flag it -> the caller creates it as draft.
   const usageLimit = shopifyDiscount.usage_limit;
   const usageCount = shopifyDiscount.usage_count || 0;
   const remaining = usageLimit != null ? Math.max(usageLimit - usageCount, 0) : null;
   const exhausted = remaining === 0;
 
+  const status = shopifyDiscount.status === 'ACTIVE' ? 'published' : 'draft';
+
   const base = {
-    applicable_for_all_merchants: false,
-    frequency: 'unlimited',
-    applicable_device: 'website',
+    mode: 'MANUAL',
+    type: 'CART', // overridden to BXGY below when applicable
     title: shopifyDiscount.title,
     description: shopifyDiscount.title,
-    visibility: 'hidden',
-    // Active Shopify discounts must land published; others stay draft.
-    status: shopifyDiscount.status === 'ACTIVE' ? 'published' : 'draft',
-    start_date: shopifyDiscount.starts_at || new Date().toISOString(),
-    end_date: shopifyDiscount.ends_at || '9999-12-31T23:59:59Z',
     terms_and_conditions: shopifyDiscount.title ? [shopifyDiscount.title] : [],
-    applicable_for_all_users: mapCustomerSelection(shopifyDiscount.customer_selection),
-    exclude_applicable_user_id: false,
-    applicable_user_categories: [],
-    // Customer-specific discounts: OS assigns its OWN customer UUID (NOT the Shopify id),
-    // so translate via idMapping.customers (built from email lookup / create in stage 2).
-    applicable_user_id: mapCustomerUserIds(shopifyDiscount.customer_selection, idMapping),
-    // Remaining uses (limit - already used); no limit -> effectively unlimited.
-    available_coupons: remaining == null ? 1000000 : (remaining >= 1 ? remaining : 1),
-    max_coupon_per_customer: shopifyDiscount.once_per_customer ? 1 : 1000000,
+    status,
+    valid_from: shopifyDiscount.starts_at || new Date().toISOString(),
+    // valid_until only when Shopify has an end; omit for no-expiry (matches the dashboard).
+    ...(shopifyDiscount.ends_at ? { valid_until: shopifyDiscount.ends_at } : {}),
+    visibility: 'hidden',
+    view_in_listing: true,
+    usage_limit: {
+      total_uses: remaining == null ? 0 : remaining, // 0 = unlimited
+      per_user: shopifyDiscount.once_per_customer ? 1 : 0, // 0 = unlimited per user
+      per_order: 1,
+    },
+    targeting: {
+      applicable_for_all_users: mapCustomerSelection(shopifyDiscount.customer_selection),
+      // Customer-specific: OS assigns its OWN customer UUID (NOT the Shopify id), translated via
+      // idMapping.customers (built from email/phone lookup or create in stage 2).
+      applicable_user_ids: mapCustomerUserIds(shopifyDiscount.customer_selection, idMapping),
+      applicable_user_categories: [],
+      exclude_user_ids: false,
+      applicable_for_all_merchants: false,
+      applicable_devices: ['website'],
+    },
   };
 
-  // Map rules based on discount type
-  const { rules, unmappedIds } = mapRules(shopifyDiscount, idMapping);
+  // Build type-specific actions + cart_conditions.
+  const { type, actions, cartConditions, unmappedIds } = mapByType(shopifyDiscount, idMapping);
+  base.type = type;
+  if (actions) base.actions = actions;
+  if (cartConditions) base.cart_conditions = cartConditions;
 
   return {
     ...base,
-    rules,
     _meta: {
       shopify_id: shopifyDiscount.shopify_id,
       shopify_type: shopifyDiscount.shopify_type,
@@ -72,8 +99,8 @@ function mapCustomerSelection(customerSelection) {
 }
 
 // Translate Shopify customers -> OS customer UUIDs via idMapping (built by resolving each
-// customer's email against OS in stage 2). Falls back to nothing if unresolved (the caller
-// tracks that so we don't silently target the wrong/empty audience).
+// customer's email/phone against OS in stage 2). Unresolved customers are dropped (the caller
+// tracks that via count so a customer-specific discount that resolved to nobody stays draft).
 function mapCustomerUserIds(customerSelection, idMapping) {
   if (!customerSelection || customerSelection.type !== 'specific_customers') return [];
   return (customerSelection.customers ?? [])
@@ -81,282 +108,176 @@ function mapCustomerUserIds(customerSelection, idMapping) {
     .filter(Boolean);
 }
 
-function mapRules(discount, idMapping) {
+function mapByType(discount, idMapping) {
   switch (discount.normalized_type) {
     case 'code_basic':
     case 'automatic_basic':
-      return mapBasicDiscountRules(discount, idMapping);
-
+      return mapBasic(discount, idMapping);
     case 'code_bxgy':
     case 'automatic_bxgy':
-      return mapBxgyRules(discount, idMapping);
-
+      return mapBxgy(discount, idMapping);
+    // Free shipping is not representable as a CART/BXGY discount -> no actions (caller skips it).
     case 'code_free_shipping':
     case 'automatic_free_shipping':
-      return { rules: [], unmappedIds: [] };
-
     default:
-      return { rules: [], unmappedIds: [] };
+      return { type: 'CART', actions: [], cartConditions: null, unmappedIds: [] };
   }
 }
 
-function mapBasicDiscountRules(discount, idMapping) {
-  const conditions = [];
-  const actions = [];
+// ---- CART (amount/percentage off, optionally scoped to products/collections) ----
+function mapBasic(discount, idMapping) {
   const unmappedIds = [];
-
-  const isAllProducts = discount.items?.type === 'all' || !discount.items;
   const isPercentage = discount.value_type === 'percentage';
-  const isFixedAmount = discount.value_type === 'fixed_amount';
 
-  // Build conditions
-  const condition = {
-    discount_type: 'CartDiscount',
-  };
+  // Action: FLAT_OFF (fixed, in paisa) or PERCENT_OFF (percentage, as-is).
+  const action = isPercentage
+    ? { type: 'CART', method: 'PERCENT_OFF', amount: Number(discount.value) }
+    : { type: 'CART', method: 'FLAT_OFF', amount: toPaisa(discount.value) };
 
-  // Add minimum requirement (value can be string or number)
-  if (discount.minimum_requirement?.type === 'subtotal' && discount.minimum_requirement.value != null) {
-    const value = Number(discount.minimum_requirement.value);
-    if (!isNaN(value) && value > 0) {
-      condition.min_cart_value = toPaisa(value); // money -> paisa
-    }
-  } else if (discount.minimum_requirement?.type === 'quantity' && discount.minimum_requirement.value != null) {
-    const value = Number(discount.minimum_requirement.value);
-    if (!isNaN(value) && value > 0) {
-      condition.min_product_quantity = value;
-    }
-  }
+  // Minimum requirement (Shopify: subtotal amount or item quantity).
+  const min = readMinimum(discount);
 
-  // Resolve product scope
-  let resolvedAllProducts = isAllProducts;
-  let resolvedAttribute = null;
-  let resolvedList = [];
-
+  // Product/collection scope -> product_matchers (the field the dashboard reads for "Applies to").
+  // A quantity minimum is expressed on the matcher's min_quantity; otherwise min_quantity is 1.
+  const isAllProducts = discount.items?.type === 'all' || !discount.items;
+  let matcher = null;
   if (!isAllProducts) {
-    const { productAttribute, applicableList, unmapped } = mapItemsToOpenStore(discount.items, idMapping);
-    unmappedIds.push(...unmapped);
-
-    // OpenStore supports ProductId / VariantId / CollectionId scopes (confirmed via the
-    // dashboard "Amount off products" form). IDs are the Shopify numeric IDs (OS reuses them).
-    if (productAttribute && applicableList.length > 0) {
-      resolvedAttribute = productAttribute;
-      resolvedList = applicableList;
-    } else {
-      // No resolvable scope (empty list) — fall back to cart-level rather than fail.
-      resolvedAllProducts = true;
-    }
+    const scopeMinQty = min.kind === 'quantity' ? min.value : 1;
+    const m = buildMatcher(discount.items, idMapping, scopeMinQty);
+    unmappedIds.push(...m.unmapped);
+    if (m.matcher && !m.matcher.all_products) matcher = m.matcher;
+    // If nothing resolved (e.g. all collections unmapped), matcher stays null -> treated as
+    // sitewide; migrate-stage2 sees the unmappedIds and drafts it so we don't publish a wrong scope.
   }
 
-  if (resolvedAllProducts) {
-    condition.allow_all = true;
-    if (condition.min_product_quantity) {
-      delete condition.min_product_quantity;
-    }
-  } else {
-    condition.product_attribute = resolvedAttribute;
-    condition.applicable_list = resolvedList;
-    if (!condition.min_product_quantity || typeof condition.min_product_quantity !== 'number') {
-      condition.min_product_quantity = 1;
-    }
+  // Assemble cart_conditions. KEY CONSTRAINT (verified against the V2 API):
+  //   product_matchers are ONLY allowed on CART_QUANTITY — CART_AMOUNT rejects them.
+  // So a SCOPED discount always uses CART_QUANTITY, and a subtotal minimum is carried as the
+  // matcher's `min_value` (paisa) — "minimum cart value from matched products". Only an
+  // UNSCOPED subtotal minimum uses CART_AMOUNT.
+  let cartConditions = null;
+  if (matcher) {
+    if (min.kind === 'subtotal') matcher.min_value = toPaisa(min.value);
+    cartConditions = { type: 'CART_QUANTITY', min_value: 1, product_matchers: [matcher] };
+  } else if (min.kind === 'subtotal') {
+    cartConditions = { type: 'CART_AMOUNT', min_value: toPaisa(min.value), reference: 'SUBTOTAL' };
+  } else if (min.kind === 'quantity') {
+    cartConditions = { type: 'CART_QUANTITY', min_value: min.value };
   }
 
-  conditions.push(condition);
-
-  // Build actions (money in RUPEES)
-  const action = {
-    discount_type: 'CartDiscount',
-  };
-
-  if (resolvedAllProducts) {
-    // Cart-level discount
-    if (isPercentage) {
-      action.applicability_type = 'cart_percentage_discount';
-      action.value = discount.value; // percentage — no paisa conversion
-    } else if (isFixedAmount) {
-      action.applicability_type = 'cart_fixed_discount';
-      action.value = toPaisa(discount.value); // money -> paisa
-    }
-  } else {
-    // Product-level discount
-    action.applicability_type = 'product_discount';
-    action.discount_method = isPercentage ? 'percentage' : 'flat';
-    action.value = isPercentage ? discount.value : toPaisa(discount.value); // flat money -> paisa
-    action.product_attribute = resolvedAttribute;
-    action.eligible_list = resolvedList;
-  }
-
-  actions.push(action);
-
-  return {
-    rules: [{
-      priority: 1,
-      conditions,
-      actions,
-    }],
-    unmappedIds,
-  };
+  return { type: 'CART', actions: [action], cartConditions, unmappedIds };
 }
 
-function mapBxgyRules(discount, idMapping) {
-  const bxgyConfig = discount.bxgy_configuration;
-  if (!bxgyConfig) {
-    return { rules: [], unmappedIds: [] };
-  }
-
-  const conditions = [];
-  const actions = [];
+// ---- BXGY (buy X get Y) ----
+function mapBxgy(discount, idMapping) {
+  const cfg = discount.bxgy_configuration;
+  if (!cfg) return { type: 'BXGY', actions: [], cartConditions: null, unmappedIds: [] };
   const unmappedIds = [];
 
-  // Build conditions (customer_buys)
-  const customerBuys = bxgyConfig.customer_buys;
-  const condition = {
-    discount_type: 'BxGy',
-  };
-
-  if (customerBuys?.value?.type === 'quantity' && customerBuys.value.quantity != null) {
-    const qty = Number(customerBuys.value.quantity);
-    condition.min_product_quantity = isNaN(qty) || qty < 1 ? 1 : qty;
-  } else {
-    condition.min_product_quantity = 1;
+  // Buy side -> buy_rules matcher with the required buy quantity.
+  const buys = cfg.customer_buys;
+  let buyQty = 1;
+  if (buys?.value?.type === 'quantity' && buys.value.quantity != null) {
+    const q = Number(buys.value.quantity);
+    buyQty = Number.isFinite(q) && q >= 1 ? q : 1;
   }
+  const buyMatch = buildMatcher(buys?.items, idMapping, buyQty);
+  unmappedIds.push(...buyMatch.unmapped);
+  const buyRules = [buyMatch.matcher || { all_products: true, min_quantity: buyQty }];
 
-  if (customerBuys?.items?.type === 'all') {
-    condition.allow_all = true;
-  } else if (customerBuys?.items) {
-    const { productAttribute, applicableList, unmapped } = mapItemsToOpenStore(customerBuys.items, idMapping);
-    unmappedIds.push(...unmapped);
-    if (productAttribute && applicableList.length > 0) {
-      condition.product_attribute = productAttribute;
-      condition.applicable_list = applicableList;
+  // Get side -> get_rule matcher + get_quantity + method.
+  const gets = cfg.customer_gets;
+  const getsValue = gets?.value;
+  let getQty = 1;
+  if (getsValue?.detail?.quantity?.quantity != null) getQty = Number(getsValue.detail.quantity.quantity);
+  else if (getsValue?.detail?.quantity != null) getQty = Number(getsValue.detail.quantity);
+  if (!Number.isFinite(getQty) || getQty < 1) getQty = 1;
+
+  const action = { type: 'BXGY' };
+  const pctType = getsValue?.value_type === 'percentage' || getsValue?.detail?.effect?.value_type === 'percentage';
+  const fixedType = getsValue?.value_type === 'fixed_amount' || getsValue?.detail?.effect?.value_type === 'fixed_amount';
+  if (pctType) {
+    const pct = getsValue.value ?? getsValue.detail?.effect?.value;
+    if (Number(pct) === 100) {
+      action.method = 'FREE';
     } else {
-      condition.allow_all = true;
+      action.method = 'PERCENT_OFF';
+      action.amount = Number(pct);
     }
+  } else if (fixedType) {
+    action.method = 'FLAT_OFF';
+    action.amount = toPaisa(getsValue.value ?? getsValue.detail?.effect?.value);
   } else {
-    condition.allow_all = true;
+    action.method = 'FREE';
   }
 
-  conditions.push(condition);
+  const getMatch = buildMatcher(gets?.items, idMapping, 1);
+  unmappedIds.push(...getMatch.unmapped);
+  action.buy_rules = buyRules;
+  action.get_rule = getMatch.matcher || { all_products: true };
+  action.get_quantity = getQty;
 
-  // Build actions (customer_gets)
-  const customerGets = bxgyConfig.customer_gets;
-  const action = {
-    discount_type: 'BxGy',
-  };
-
-  // Determine eligible quantity (the "Get Y" part)
-  const getsValue = customerGets?.value;
-  let eligibleQty = 1;
-  if (getsValue?.detail?.quantity?.quantity != null) {
-    eligibleQty = Number(getsValue.detail.quantity.quantity);
-  } else if (getsValue?.detail?.quantity != null) {
-    eligibleQty = Number(getsValue.detail.quantity);
-  }
-  action.eligible_qty = isNaN(eligibleQty) || eligibleQty < 1 ? 1 : eligibleQty;
-
-  // Discount method
-  if (getsValue?.value_type === 'percentage' || getsValue?.detail?.effect?.value_type === 'percentage') {
-    const percentage = getsValue.value || getsValue.detail?.effect?.value;
-    if (percentage === 100) {
-      action.discount_method = 'free';
-    } else {
-      action.discount_method = 'percentage';
-      action.value = percentage;
-    }
-  } else if (getsValue?.value_type === 'fixed_amount' || getsValue?.detail?.effect?.value_type === 'fixed_amount') {
-    action.discount_method = 'flat';
-    action.value = toPaisa(getsValue.value || getsValue.detail?.effect?.value); // money -> paisa
-  } else {
-    action.discount_method = 'free';
-  }
-
-  // Eligible items
-  if (customerGets?.items?.type === 'all') {
-    action.allow_all = true;
-  } else if (customerGets?.items) {
-    const { productAttribute, applicableList, unmapped } = mapItemsToOpenStore(customerGets.items, idMapping);
-    unmappedIds.push(...unmapped);
-    if (productAttribute && applicableList.length > 0) {
-      action.product_attribute = productAttribute;
-      action.eligible_list = applicableList;
-    } else {
-      action.allow_all = true;
-    }
-  } else {
-    action.allow_all = true;
-  }
-
-  actions.push(action);
-
-  return {
-    rules: [{
-      priority: 1,
-      conditions,
-      actions,
-    }],
-    unmappedIds,
-  };
+  return { type: 'BXGY', actions: [action], cartConditions: null, unmappedIds };
 }
 
-function mapFreeShippingRules(discount, idMapping) {
-  // OpenStore may not have direct free shipping support
-  // Return empty rules with a warning
-  return { rules: [], unmappedIds: [] };
+// Read Shopify minimum_requirement into a normalized {kind, value}.
+function readMinimum(discount) {
+  const mr = discount.minimum_requirement;
+  if (mr?.type === 'subtotal' && mr.value != null) {
+    const v = Number(mr.value);
+    if (Number.isFinite(v) && v > 0) return { kind: 'subtotal', value: v };
+  } else if (mr?.type === 'quantity' && mr.value != null) {
+    const v = Number(mr.value);
+    if (Number.isFinite(v) && v > 0) return { kind: 'quantity', value: v };
+  }
+  return { kind: 'none' };
 }
 
-function mapItemsToOpenStore(items, idMapping) {
-  if (!items) {
-    return { productAttribute: null, applicableList: [], unmapped: [] };
+/**
+ * Build a V2 ProductMatcher from Shopify items.
+ * OpenStore reuses Shopify numeric IDs for PRODUCTS and VARIANTS (verified), so those map by
+ * stripping the gid prefix. COLLECTIONS are the exception: OS assigns its OWN internal id and
+ * stores the Shopify id under `external_id`, so collections MUST be translated via idMapping
+ * (built from the OS /collections endpoint). Using a raw Shopify collection id would match no
+ * OS collection and silently break the scope.
+ * match_by values follow the V2 spec: Id (product_id) | VariantId | CollectionId | Tag.
+ * Returns { matcher|null, unmapped[] }.
+ */
+function buildMatcher(items, idMapping, minQty = 1) {
+  if (!items || items.type === 'all') {
+    return { matcher: { all_products: true, min_quantity: minQty }, unmapped: [] };
   }
 
-  // OpenStore reuses Shopify's numeric IDs for PRODUCTS and VARIANTS (verified:
-  // admin_graphql_api_id "gid://shopify/Product/<id>" == OS product id), so those map by
-  // stripping the gid prefix. COLLECTIONS are the exception: OS assigns its OWN internal
-  // collection id and stores the Shopify id under `external_id`. So collections MUST be
-  // translated via idMapping (built from the OS /collections endpoint) — using the raw
-  // Shopify collection id would match no OS collection and silently break the scope.
-  // Attribute names are SINGULAR, matching the dashboard payload (product_attribute: "VariantId").
   if (items.type === 'specific_collections' && items.collections?.length > 0) {
-    const mapped = [];
+    const ids = [];
     const unmapped = [];
     for (const c of items.collections) {
       const shopifyId = extractNumericId(c.id);
       const osId = idMapping?.getCollection ? idMapping.getCollection(shopifyId) : null;
-      if (osId) {
-        mapped.push(String(osId));
-      } else {
-        unmapped.push(shopifyId);
-      }
+      if (osId) ids.push(String(osId));
+      else unmapped.push(shopifyId);
     }
-    return {
-      productAttribute: 'CollectionId',
-      applicableList: mapped,
-      unmapped,
-    };
+    if (ids.length === 0) return { matcher: null, unmapped };
+    return { matcher: { match_by: 'CollectionId', ids, min_quantity: minQty }, unmapped };
   }
 
   if (items.type === 'specific_products') {
     if (items.product_variants?.length > 0) {
-      return {
-        productAttribute: 'VariantId',
-        applicableList: items.product_variants.map(v => extractNumericId(v.id)).filter(Boolean),
-        unmapped: [],
-      };
+      const ids = items.product_variants.map(v => extractNumericId(v.id)).filter(Boolean);
+      return { matcher: { match_by: 'VariantId', ids, min_quantity: minQty }, unmapped: [] };
     }
     if (items.products?.length > 0) {
-      return {
-        productAttribute: 'ProductId',
-        applicableList: items.products.map(p => extractNumericId(p.id)).filter(Boolean),
-        unmapped: [],
-      };
+      const ids = items.products.map(p => extractNumericId(p.id)).filter(Boolean);
+      return { matcher: { match_by: 'Id', ids, min_quantity: minQty }, unmapped: [] };
     }
   }
 
-  return { productAttribute: null, applicableList: [], unmapped: [] };
+  return { matcher: null, unmapped: [] };
 }
 
 function extractNumericId(gid) {
   if (!gid) return null;
-  const match = gid.match(/(\d+)$/);
+  const match = String(gid).match(/(\d+)$/);
   return match ? match[1] : gid;
 }
 
@@ -376,9 +297,6 @@ function titleAsCode(title) {
   return c.length >= 3 ? c : null;
 }
 
-/**
- * Prepares payload for single-code discount
- */
 // Some Shopify apps create discounts with an unfilled placeholder title. Show something useful
 // in OS instead of a wall of identical "{DISCOUNT_NAME}" rows.
 const PLACEHOLDER_TITLE = /^\{.*\}$/; // e.g. "{DISCOUNT_NAME}"
@@ -386,6 +304,9 @@ function isPlaceholderTitle(t) {
   return !t || !String(t).trim() || PLACEHOLDER_TITLE.test(String(t).trim());
 }
 
+/**
+ * Prepares payload for a single-code discount (strips _meta, derives the code/title).
+ */
 export function prepareSingleCodePayload(openStoreDiscount) {
   const realCode = openStoreDiscount._meta.codes[0]?.code;
   // Codeless (Shopify automatic) discounts: use the title as the code, not a random string.
@@ -402,42 +323,7 @@ export function prepareSingleCodePayload(openStoreDiscount) {
     payload.terms_and_conditions = [code];
   }
 
-  return {
-    ...payload,
-    code,
-  };
-}
-
-/**
- * Prepares payload for discount set (multiple codes)
- */
-export function prepareDiscountSetPayload(openStoreDiscount) {
-  const codes = openStoreDiscount._meta.codes || [];
-  const primaryCode = codes[0]?.code || generateCode();
-
-  const payload = { ...openStoreDiscount };
-  delete payload._meta;
-
-  // For discount sets with specific codes
-  if (codes.length > 0) {
-    return {
-      ...payload,
-      code: primaryCode,
-      number_of_random_coupons: codes.length,
-      // OpenStore generates random codes, we'll need to handle specific codes differently
-      // For now, generate random codes with a prefix based on the discount title
-      prefix: `${sanitizePrefix(openStoreDiscount.title)}-`,
-      suffix: '',
-      length: 6,
-      max_discount_per_user: payload.max_coupon_per_customer,
-    };
-  }
-
-  return {
-    ...payload,
-    code: primaryCode,
-    number_of_random_coupons: 1,
-  };
+  return { ...payload, code };
 }
 
 function generateCode() {
@@ -447,11 +333,4 @@ function generateCode() {
     code += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return code;
-}
-
-function sanitizePrefix(title) {
-  return title
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, '')
-    .slice(0, 6);
 }

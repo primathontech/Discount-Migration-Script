@@ -24,7 +24,7 @@ export async function migrateStage2({ client, discounts, config, idMapping, ledg
     if (!cs || !cs.type || cs.type === 'all') return 'all';
     if (cs.type === 'specific_customers') {
       const totalC = (cs.customers || []).length;
-      const resolved = payload ? (payload.applicable_user_id?.length ?? 0) : null;
+      const resolved = payload ? (payload.targeting?.applicable_user_ids?.length ?? 0) : null;
       return resolved != null ? `specific ${resolved}/${totalC}` : `specific ${totalC}`;
     }
     if (cs.type === 'specific_segments') return 'segments';
@@ -45,7 +45,7 @@ export async function migrateStage2({ client, discounts, config, idMapping, ledg
     const cs = discount.customer_selection;
     if (cs?.type === 'specific_customers') {
       const totalC = (cs.customers || []).length;
-      const resolved = payload?.applicable_user_id?.length ?? 0;
+      const resolved = payload?.targeting?.applicable_user_ids?.length ?? 0;
       if (totalC === 0) notes.push('customer-specific but no customer selected in Shopify');
       else if (resolved < totalC) notes.push('customer-specific: customer has no phone in Shopify');
     }
@@ -160,10 +160,10 @@ export async function migrateStage2({ client, discounts, config, idMapping, ledg
       console.log(`${progress} FAILED "${title}": ${e.message}`);
       return;
     }
-    if (!openStoreDiscount.rules || openStoreDiscount.rules.length === 0) {
-      console.log(`${progress} SKIP "${title}" - could not map rules`);
+    if (!openStoreDiscount.actions || openStoreDiscount.actions.length === 0) {
+      console.log(`${progress} SKIP "${title}" - could not map (no action; e.g. free shipping/unsupported)`);
       results.skipped.push({ shopify_id: discount.shopify_id, title, reason: 'could_not_map_rules' });
-      pushRow({ discount, statusFinal: 'n/a', outcome: 'skipped', osd: openStoreDiscount, extra: 'could not map rules' });
+      pushRow({ discount, statusFinal: 'n/a', outcome: 'skipped', osd: openStoreDiscount, extra: 'could not map (no action)' });
       return;
     }
     if (openStoreDiscount._meta?.unmappedIds?.length > 0) {
@@ -215,7 +215,7 @@ export async function migrateStage2({ client, discounts, config, idMapping, ledg
     //    - customer-specific that resolved to ZERO customers (would target nobody)
     //    - collection-scoped where a collection isn't in OS (scope would fall to sitewide)
     const customerBroken = discount.customer_selection?.type === 'specific_customers'
-      && (openStoreDiscount.applicable_user_id?.length ?? 0) === 0;
+      && (openStoreDiscount.targeting?.applicable_user_ids?.length ?? 0) === 0;
     const collectionBroken = discount.items?.type === 'specific_collections'
       && (openStoreDiscount._meta?.unmappedIds?.length ?? 0) > 0;
     const hasRealGap = openStoreDiscount._meta?.exhausted || customerBroken || collectionBroken;

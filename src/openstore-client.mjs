@@ -116,39 +116,33 @@ export class OpenStoreClient {
     return Math.round(jitter);
   }
 
+  // Inject merchant_id everywhere the dashboard V2 payload expects it (top level +
+  // targeting.applicable_merchant_ids), matching the dashboard's own create/update calls.
+  _withMerchant(payload) {
+    const out = { ...payload, merchant_id: this.merchantId };
+    if (out.targeting && typeof out.targeting === 'object') {
+      out.targeting = { ...out.targeting, applicable_merchant_ids: [this.merchantId] };
+    }
+    return out;
+  }
+
   async createDiscount(discountPayload) {
-    // Endpoint the PROD dashboard's create form uses (confirmed via captured cURL).
-    const url = `${this.baseUrl}/v3/api/api/v1/admin/os-discount/create`;
+    // Dashboard V2 endpoint — the one the PROD dashboard READS scope/conditions from (confirmed
+    // via captured cURL). The legacy os-discount/create stored a shape the dashboard's
+    // "Applies to" / minimum UI ignores, which showed collection/product scope as "All products".
+    const url = `${this.baseUrl}/v3/api/dashboard/v2/discount/create`;
     return this._request(
       url,
-      {
-        method: 'POST',
-        body: JSON.stringify({ ...discountPayload, merchant_id: this.merchantId }),
-      },
+      { method: 'POST', body: JSON.stringify(this._withMerchant(discountPayload)) },
       'OpenStore create discount',
     );
   }
 
-  async createDiscountSet(discountSetPayload) {
-    const url = `${this.baseUrl}/v3/api/services/discount/create-discount-set`;
-    return this._request(
-      url,
-      {
-        method: 'POST',
-        body: JSON.stringify({ ...discountSetPayload, merchant_id: this.merchantId }),
-      },
-      'OpenStore create discount set',
-    );
-  }
-
   async updateDiscount(discountId, discountPayload) {
-    const url = `${this.baseUrl}/v3/api/services/discount/update/${discountId}`;
+    const url = `${this.baseUrl}/v3/api/dashboard/v2/discount/update/${discountId}`;
     return this._request(
       url,
-      {
-        method: 'PUT',
-        body: JSON.stringify({ ...discountPayload, merchant_id: this.merchantId }),
-      },
+      { method: 'PUT', body: JSON.stringify(this._withMerchant(discountPayload)) },
       'OpenStore update discount',
     );
   }

@@ -119,6 +119,9 @@ const server = http.createServer(async (req, res) => {
       if (b.skipSets) args.push('--skip-sets=true');
       if (b.skipCustomerSpecific) args.push('--skip-customer-specific=true');
       if (b.resetLedger) args.push('--resetLedger=true');
+      // Optional: migrate ONLY discounts whose code/title matches (for a single manual re-create).
+      const oneCode = String(b.code || '').trim();
+      if (oneCode) args.push(`--code=${oneCode}`);
       return send(res, 200, startRun('Stage 2 — migrate', args, { NODE_OPTIONS: '--max-old-space-size=8192' }));
     }
     if (u.pathname === '/api/run/delete' && req.method === 'POST') {

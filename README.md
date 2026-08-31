@@ -17,6 +17,10 @@ Then open **http://127.0.0.1:4321**. From the page you can:
 2. Run **Stage 1** (extract) and **Stage 2** (migrate) with live logs.
 3. **Download** the Excel report.
 
+Stage 2 has an optional **"Only this code"** box (migrate a single discount by code/title), and the
+Delete card takes **specific codes** — so you can delete one discount and re-create just that one
+from the page, without touching the rest.
+
 It runs the exact same code as the terminal commands below — use whichever you prefer.
 
 ---
@@ -82,9 +86,14 @@ Useful flags:
 | `--skip-sets=true` | defer multi-code “sets” (they expand to one discount per code — can be huge) |
 | `--skip-customer-specific=true` | defer customer-specific discounts to a later run |
 | `--active-only` | migrate only active discounts from the file |
+| `--code=DD150` | migrate only discounts whose code/title matches (for a single manual re-create) |
 | `--resetLedger=true` | start fresh (ignore the resume ledger) |
 
 **What Step 2 does automatically:**
+- Creates discounts in the **Ratio dashboard's own V2 shape** (`type` / `actions` /
+  `cart_conditions.product_matchers` / `targeting`) via `POST /v3/api/dashboard/v2/discount/create`
+  — the endpoint the dashboard actually reads scope & minimums from, so "Applies to" and the
+  minimum-purchase condition render correctly (the older `os-discount/create` did not).
 - Money & minimum-purchase → **paisa** (× 100)
 - **Collections** → translated to OS collection IDs (OS uses its own IDs)
 - **Customer-specific** → looks up the customer by **exact email/phone**; if missing, **creates**

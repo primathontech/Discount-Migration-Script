@@ -73,6 +73,8 @@
     <h2><span class="step">3</span> Stage 2 — Migrate to Ratio</h2>
     <label>Extract file</label>
     <select id="s2file"><option value="">— run Stage 1 first, or pick an existing extract —</option></select>
+    <label style="margin-top:10px">Only this code <span class="muted">(optional — migrate a single discount by code/title; blank = all)</span></label>
+    <input id="s2code" placeholder="e.g. DD150  (leave blank to migrate everything)">
     <div style="margin-top:6px">
       <label class="chk"><input type="checkbox" id="skipSets"> Skip multi-code sets (defer huge code-sets)</label>
       <label class="chk"><input type="checkbox" id="skipCust"> Skip customer-specific discounts</label>
@@ -184,7 +186,7 @@ async function runStage1(){
 async function runStage2(){
   const file=$('s2file').value; if(!file){ toast('Pick an extract file'); return; }
   const btn=$('s2btn'), log=$('s2log'); btn.disabled=true; log.style.display='block'; log.textContent='Starting…\n';
-  const body={ file, skipSets:$('skipSets').checked, skipCustomerSpecific:$('skipCust').checked, resetLedger:$('resetLedger').checked };
+  const body={ file, code:$('s2code').value.trim(), skipSets:$('skipSets').checked, skipCustomerSpecific:$('skipCust').checked, resetLedger:$('resetLedger').checked };
   const res = await (await fetch('/api/run/stage2',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
   if(res.error){ log.textContent+=res.error+'\n'; btn.disabled=false; return; }
   poll(res.runId, log, btn, ()=>{ loadReports(); toast('Stage 2 finished'); }, 'Stage 2 — migrating to Ratio…');
